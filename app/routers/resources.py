@@ -1,20 +1,3 @@
-"""
-Resource endpoints — the heart of the service.
-
-Every function here maps to one HTTP endpoint.  FastAPI uses Python type
-annotations to:
-  - Deserialise & validate the incoming JSON body
-  - Serialise the return value to JSON
-  - Generate accurate OpenAPI documentation at /docs
-
-Endpoint summary:
-  POST   /resources                   → provision a new resource
-  GET    /resources                   → list all (with optional filters)
-  GET    /resources/{resource_id}     → get a single resource
-  PATCH  /resources/{resource_id}/policy → update status / policy tags
-  DELETE /resources/{resource_id}     → deprovision (soft-delete)
-"""
-
 import json
 import logging
 import uuid
@@ -34,21 +17,12 @@ from app.models import (
 )
 
 logger = logging.getLogger(__name__)
-
-# APIRouter is like a Flask Blueprint — it groups related routes.
-# main.py mounts this router under the /resources prefix.
 router = APIRouter()
 
+REQUIRED_TAGS = {"env", "cost-centre"}
 
-# ---------------------------------------------------------------------------
-# Helper — fetch one resource row or raise 404
-# ---------------------------------------------------------------------------
 
 def _get_or_404(resource_id: str) -> dict:
-    """
-    Look up a resource by id.  Raises HTTPException(404) if not found.
-    Returns a plain dict so callers don't have to think about sqlite3.Row.
-    """
     conn = get_connection()
     try:
         row = conn.execute(
@@ -58,38 +32,36 @@ def _get_or_404(resource_id: str) -> dict:
         conn.close()
 
     if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Resource '{resource_id}' not found.",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail=f"Resource '{resource_id}' not found.")
     return dict(row)
 
 
-# ---------------------------------------------------------------------------
-# POST /resources  — provision
-# ---------------------------------------------------------------------------
+def _record_event(resource_id: str, action: str, actor: str, detail: str = None):
+    # Fire-and-forget audit entry; failures here should not break the main operation
+    try:
+        conn = get_connection()
+        conn.execute(
+            "INSERT INTO events (id, resource_id, action, actor, detail, occurred_at) VALUES (?,?,?,?,?,?)",
+            (str(uuid.uuid4()), resource_id, action, actor, detail, datetime.now(timezone.utc)),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        logger.exception("Failed to write audit event for %s", resource_id)
 
-@router.post(
-    "/",
-    response_model=ResourceResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Provision a new cloud resource",
-    description=(
-        "Creates a new resource record with status=active.  "
-        "Simulates the provisioning step in a cloud control plane."
-    ),
-)
+
+@router.post("/", response_model=ResourceResponse, status_code=status.HTTP_201_CREATED)
 def provision_resource(body: ResourceCreate):
-    """
-    Steps:
-    1. Generate a UUID for the new resource.
-    2. Capture the current UTC time as created_at and updated_at.
-    3. Serialise policy_tags dict → JSON string for SQLite storage.
-    4. INSERT the row and return the full object.
-    """
+    missing = REQUIRED_TAGS - body.policy_tags.keys()
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Missing required policy tags: {sorted(missing)}",
+        )
+
     resource_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
-    policy_tags_json = json.dumps(body.policy_tags)
 
     conn = get_connection()
     try:
@@ -97,63 +69,37 @@ def provision_resource(body: ResourceCreate):
             """
             INSERT INTO resources
                 (id, name, type, status, owner, policy_tags, region, created_at, updated_at)
-            VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (
-                resource_id,
-                body.name,
-                body.type.value,          # store the string value, not the enum
-                ResourceStatus.ACTIVE.value,
-                body.owner,
-                policy_tags_json,
-                body.region,
-                now,
-                now,
-            ),
+            (resource_id, body.name, body.type.value, ResourceStatus.ACTIVE.value,
+             body.owner, json.dumps(body.policy_tags), body.region, now, now),
         )
         conn.commit()
-        logger.info("Provisioned resource %s (type=%s, owner=%s)", resource_id, body.type, body.owner)
     finally:
         conn.close()
 
-    # Fetch and return the freshly-created row
+    _record_event(resource_id, "provisioned", body.owner)
+    logger.info("Provisioned %s (type=%s owner=%s)", resource_id, body.type, body.owner)
     return ResourceResponse(**_get_or_404(resource_id))
 
 
-# ---------------------------------------------------------------------------
-# GET /resources  — list (with optional filters)
-# ---------------------------------------------------------------------------
-
-@router.get(
-    "/",
-    response_model=List[ResourceResponse],
-    summary="List all resources",
-    description="Returns all resources, optionally filtered by type, status, or owner.",
-)
+@router.get("/", response_model=List[ResourceResponse])
 def list_resources(
-    # Query parameters — client adds them as ?type=vm&status=active etc.
-    type:   Optional[ResourceType]   = Query(default=None, description="Filter by resource type"),
-    status: Optional[ResourceStatus] = Query(default=None, description="Filter by lifecycle status"),
-    owner:  Optional[str]            = Query(default=None, description="Filter by owner"),
+    type:   Optional[ResourceType]   = Query(default=None),
+    status: Optional[ResourceStatus] = Query(default=None),
+    owner:  Optional[str]            = Query(default=None),
 ):
-    """
-    Builds a dynamic WHERE clause from whichever filters the client provided.
-    Using parameterised queries (?, ?) prevents SQL injection.
-    """
-    query  = "SELECT * FROM resources WHERE 1=1"  # 1=1 makes appending AND easy
+    query  = "SELECT * FROM resources WHERE 1=1"
     params: list = []
 
     if type is not None:
-        query  += " AND type = ?"
+        query += " AND type = ?"
         params.append(type.value)
-
     if status is not None:
-        query  += " AND status = ?"
+        query += " AND status = ?"
         params.append(status.value)
-
     if owner is not None:
-        query  += " AND owner = ?"
+        query += " AND owner = ?"
         params.append(owner)
 
     query += " ORDER BY created_at DESC"
@@ -167,103 +113,46 @@ def list_resources(
     return [ResourceResponse(**dict(row)) for row in rows]
 
 
-# ---------------------------------------------------------------------------
-# GET /resources/{resource_id}  — get one
-# ---------------------------------------------------------------------------
-
-@router.get(
-    "/{resource_id}",
-    response_model=ResourceResponse,
-    summary="Get a single resource",
-)
+@router.get("/{resource_id}", response_model=ResourceResponse)
 def get_resource(resource_id: str):
     return ResourceResponse(**_get_or_404(resource_id))
 
 
-# ---------------------------------------------------------------------------
-# PATCH /resources/{resource_id}/policy  — update policy / status
-# ---------------------------------------------------------------------------
-
-@router.patch(
-    "/{resource_id}/policy",
-    response_model=ResourceResponse,
-    summary="Update resource policy tags or status",
-    description=(
-        "Partial update: send only the fields you want to change.  "
-        "Simulates a governance control-plane operation."
-    ),
-)
+@router.patch("/{resource_id}/policy", response_model=ResourceResponse)
 def update_policy(resource_id: str, body: PolicyUpdate):
-    """
-    1. Load current resource (→ 404 if missing).
-    2. Merge any provided fields over the existing values.
-    3. UPDATE the row with a new updated_at timestamp.
-    4. Return the updated object.
-    """
     current = _get_or_404(resource_id)
 
-    # Guard: can't update a deprovisioned resource
     if current["status"] == ResourceStatus.DEPROVISIONED.value:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Cannot update a deprovisioned resource.",
-        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="Cannot update a deprovisioned resource.")
 
-    # Decide new values — keep existing if client didn't send a replacement
-    new_policy_tags = (
-        json.dumps(body.policy_tags)
-        if body.policy_tags is not None
-        else current["policy_tags"]   # already a JSON string in the DB
-    )
+    new_tags = json.dumps(body.policy_tags) if body.policy_tags is not None else current["policy_tags"]
     new_status = body.status.value if body.status is not None else current["status"]
     now = datetime.now(timezone.utc)
 
     conn = get_connection()
     try:
         conn.execute(
-            """
-            UPDATE resources
-               SET policy_tags = ?, status = ?, updated_at = ?
-             WHERE id = ?
-            """,
-            (new_policy_tags, new_status, now, resource_id),
+            "UPDATE resources SET policy_tags = ?, status = ?, updated_at = ? WHERE id = ?",
+            (new_tags, new_status, now, resource_id),
         )
         conn.commit()
-        logger.info("Updated resource %s — status=%s", resource_id, new_status)
     finally:
         conn.close()
 
+    _record_event(resource_id, "policy_updated", "api", f"status={new_status}")
     return ResourceResponse(**_get_or_404(resource_id))
 
 
-# ---------------------------------------------------------------------------
-# DELETE /resources/{resource_id}  — deprovision (soft-delete)
-# ---------------------------------------------------------------------------
-
-@router.delete(
-    "/{resource_id}",
-    response_model=MessageResponse,
-    summary="Deprovision a resource",
-    description=(
-        "Soft-deletes the resource by setting status=deprovisioned.  "
-        "The record is kept for audit purposes — it is never hard-deleted."
-    ),
-)
+@router.delete("/{resource_id}", response_model=MessageResponse)
 def deprovision_resource(resource_id: str):
-    """
-    Real cloud platforms rarely hard-delete billing/audit records.
-    We simulate this with a status transition to 'deprovisioned'.
-    """
     current = _get_or_404(resource_id)
 
     if current["status"] == ResourceStatus.DEPROVISIONED.value:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Resource is already deprovisioned.",
-        )
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="Resource is already deprovisioned.")
 
     now = datetime.now(timezone.utc)
-
     conn = get_connection()
     try:
         conn.execute(
@@ -271,11 +160,27 @@ def deprovision_resource(resource_id: str):
             (ResourceStatus.DEPROVISIONED.value, now, resource_id),
         )
         conn.commit()
-        logger.info("Deprovisioned resource %s", resource_id)
     finally:
         conn.close()
 
+    _record_event(resource_id, "deprovisioned", current["owner"])
+    logger.info("Deprovisioned %s", resource_id)
     return MessageResponse(
         message=f"Resource '{current['name']}' has been deprovisioned.",
         resource_id=resource_id,
     )
+
+
+@router.get("/{resource_id}/events")
+def get_resource_events(resource_id: str):
+    """Audit trail for a resource — all state changes in chronological order."""
+    _get_or_404(resource_id)
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM events WHERE resource_id = ? ORDER BY occurred_at ASC",
+            (resource_id,),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [dict(row) for row in rows]

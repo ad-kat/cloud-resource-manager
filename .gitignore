@@ -1,1 +1,7 @@
 .venv/
+
+echo "*.db" >> .gitignore
+git rm --cached resources.db
+git add .
+git commit -m "Fix resources router, remove db file from tracking"
+git push
