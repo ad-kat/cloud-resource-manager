@@ -1,3 +1,5 @@
+Cloud resource lifecycle API — policy enforcement, cost estimation, and drift detection. Built to understand the patterns behind AWS/GCP control planes.
+
 # ☁️ Cloud Resource Lifecycle Manager
 
 A **cloud-native REST API** that simulates the full lifecycle of cloud resources — provisioning, governance, and deprovisioning — using the same patterns found in real cloud control planes (AWS EC2/S3, GCP Compute, Azure ARM).
