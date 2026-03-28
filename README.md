@@ -13,28 +13,28 @@ Runs entirely locally — no cloud account, no paid tools, no licences required.
 ┌─────────────────────────────────────────────────────────────┐
 │                     docker-compose                          │
 │                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              api container  (:8000)                  │   │
-│  │                                                      │   │
-│  │   HTTP Request                                       │   │
-│  │       │                                              │   │
-│  │       ▼                                              │   │
-│  │  ┌──────────┐    route     ┌──────────────────────┐ │   │
-│  │  │  FastAPI  │ ──────────► │  resources router    │ │   │
-│  │  │  (ASGI)   │             │  POST   /resources   │ │   │
-│  │  │  Uvicorn  │             │  GET    /resources   │ │   │
-│  │  └──────────┘             │  GET    /resources/id│ │   │
-│  │                            │  PATCH  /../policy   │ │   │
-│  │                            │  DELETE /resources/id│ │   │
-│  │                            └──────────┬───────────┘ │   │
-│  │                                       │ SQL          │   │
-│  │                                       ▼              │   │
-│  │                            ┌──────────────────────┐ │   │
-│  │                            │   SQLite (resources  │ │   │
-│  │                            │   .db on named       │ │   │
-│  │                            │   Docker volume)     │ │   │
-│  │                            └──────────────────────┘ │   │
-│  └─────────────────────────────────────────────────────┘   │
+│  ┌─────────────────────────────────────────────────────┐    │
+│  │              api container  (:8000)                 │    │
+│  │                                                     │    │
+│  │   HTTP Request                                      │    │
+│  │       │                                             │    │
+│  │       ▼                                             │    │
+│  │  ┌──────────┐    route     ┌──────────────────────┐ │    │
+│  │  │  FastAPI │ ──────────►  │  resources router    │ │    │
+│  │  │  (ASGI)  │              │  POST   /resources   │ │    │
+│  │  │  Uvicorn │              │  GET    /resources   │ │    │
+│  │  └──────────┘              │  GET    /resources/id│ │    │
+│  │                            │  PATCH  /../policy   │ │    │ 
+│  │                            │  DELETE /resources/id│ │    │
+│  │                            └──────────┬───────────┘ │    │
+│  │                                       │ SQL         │    │
+│  │                                       ▼             │    │
+│  │                            ┌──────────────────────┐ │    │
+│  │                            │   SQLite (resources  │ │    │ 
+│  │                            │   .db on named       │ │    │
+│  │                            │   Docker volume)     │ │    │
+│  │                            └──────────────────────┘ │    │
+│  └─────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
           ▲
           │  curl / Postman / browser
@@ -75,50 +75,41 @@ Resource
 
 ## API endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/resources` | Provision a new resource (status → **active**) |
-| `GET` | `/resources` | List all resources (filter by `?type=`, `?status=`, `?owner=`) |
-| `GET` | `/resources/{id}` | Get one resource by ID |
-| `PATCH` | `/resources/{id}/policy` | Update policy tags and/or status |
-| `DELETE` | `/resources/{id}` | Deprovision (status → **deprovisioned**, audit record kept) |
-| `GET` | `/health` | Liveness probe |
-| `GET` | `/docs` | Interactive OpenAPI UI (Swagger) |
+| Method  | Path                     | Description 
+|---------|--------------------------|-------------
+| `POST`  | `/resources`             | Provision a new resource (status → **active**) 
+| `GET`   | `/resources`             | List all resources (filter by `?type=`, `?status=`, `?owner=`) 
+| `GET`   | `/resources/{id}`        | Get one resource by ID 
+| `PATCH` | `/resources/{id}/policy` | Update policy tags and/or status 
+| `DELETE`| `/resources/{id}`        | Deprovision (status → **deprovisioned**, audit record kept) 
+| `GET`   | `/health`                | Liveness probe 
+| `GET`   | `/docs`                  | Interactive OpenAPI UI (Swagger) 
 
 ---
 
 ## Quick-start (local, no Docker)
 
 ```bash
-# 1. Clone
-git clone https://github.com/YOUR_USERNAME/cloud-resource-manager.git
+
+git clone https://github.com/ad-kat/cloud-resource-manager.git
 cd cloud-resource-manager
 
-# 2. Create a virtual environment and install dependencies
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000 # 3. Run the development server
 
-# 3. Run the development server
-uvicorn app.main:app --reload --port 8000
-
-# 4. Open the interactive API docs
-#    → http://localhost:8000/docs
+# 4. Open the interactive API docs → http://localhost:8000/docs
 ```
-
 ---
 
 ## Quick-start (Docker / docker-compose)
 
 ```bash
-# Build the image and start the container in the background
-docker compose up --build -d
 
-# Check it's running
+docker compose up --build -d
 docker compose ps
 docker compose logs api
-
-# Stop everything (DB data is preserved in the Docker volume)
 docker compose down
 ```
 

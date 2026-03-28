@@ -1,6 +1,7 @@
-# Production dependencies
-# All packages are open source (MIT / BSD / Apache 2.0 licensed)
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.1
 
-fastapi==0.111.0          # Web framework — async-first, OpenAPI auto-docs
-uvicorn[standard]==0.29.0 # ASGI server — runs the FastAPI app
-pydantic==2.7.1           # Data validation (ships with FastAPI, pinned for reproducibility)
+# dev / test
+pytest==8.2.0
+httpx==0.27.0
