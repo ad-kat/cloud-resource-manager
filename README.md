@@ -1,4 +1,3 @@
-Cloud resource lifecycle API — policy enforcement, cost estimation, and drift detection. Built to understand the patterns behind AWS/GCP control planes.
 
 # ☁️ Cloud Resource Lifecycle Manager
 
