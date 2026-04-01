@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Optional
-import json
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 
 class ResourceType(str, Enum):
@@ -32,12 +32,19 @@ class ResourceCreate(BaseModel):
         examples=[{"env": "prod", "cost-centre": "eng-platform"}],
     )
     region: str = Field(default="us-east-1", examples=["us-east-1"])
+    # optional TTL — if set, the scheduler will auto-stop the resource after this many hours
+    # useful for short-lived dev/test environments that tend to get forgotten
+    ttl_hours: Optional[int] = Field(
+        default=None,
+        description="Auto-stop after N hours. Leave empty for no expiry.",
+        examples=[720],
+    )
 
 
 class PolicyUpdate(BaseModel):
-    # Partial update — only send the fields you want to change
-    policy_tags: Optional[dict] = Field(default=None)
-    status: Optional[ResourceStatus] = Field(default=None)
+    # partial update — only send the fields you actually want to change
+    policy_tags: Optional[dict]           = Field(default=None)
+    status:      Optional[ResourceStatus] = Field(default=None)
 
 
 class ResourceResponse(BaseModel):
@@ -48,20 +55,14 @@ class ResourceResponse(BaseModel):
     owner:       str
     policy_tags: dict
     region:      str
+    cost_per_hr: Decimal
+    ttl_hours:   Optional[int]
     created_at:  datetime
     updated_at:  datetime
 
     model_config = {"from_attributes": True}
 
-    @field_validator("policy_tags", mode="before")
-    @classmethod
-    def parse_policy_tags(cls, v):
-        # SQLite returns JSON strings; deserialise transparently
-        if isinstance(v, str):
-            return json.loads(v)
-        return v
-
 
 class MessageResponse(BaseModel):
-    message: str
+    message:     str
     resource_id: str

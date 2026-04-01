@@ -1,49 +1,43 @@
-#version: "3.9"   # Compose file format version — 3.9 supports all v2 features
-
 services:
 
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER:     postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB:       resources
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    # healthcheck lets the api service wait until postgres is actually ready
+    # before starting — without this the app crashes on boot half the time
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout:  5s
+      retries:  5
+
   api:
-    # Build the image from the Dockerfile in the current directory
     build:
-      context: .
+      context:    .
       dockerfile: Dockerfile
-
-    # Name the resulting image so it's easy to reference
     image: cloud-resource-manager:latest
-
-    # Map host port 8000 → container port 8000
-    # Format: "HOST_PORT:CONTAINER_PORT"
-    # You can change the left number if 8000 is already in use on your machine
     ports:
       - "8000:8000"
-
-    # Mount a named volume at /app/data inside the container.
-    # This means the SQLite DB file survives container restarts — without this
-    # every `docker compose down` would wipe all your data.
-    volumes:
-      - db_data:/app/data
-
-    # Environment variables passed into the container at runtime.
-    # Overrides the defaults baked into the Dockerfile ENV instruction.
     environment:
-      - DB_PATH=/app/data/resources.db
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/resources
       - PYTHONUNBUFFERED=1
-
-    # Restart policy — useful when running as a long-lived service
+    depends_on:
+      db:
+        condition: service_healthy   # don't start until postgres passes its healthcheck
     restart: unless-stopped
-
-    # Health check: Docker will call this every 30 s.
-    # If it fails 3 times in a row, the container is marked "unhealthy".
-    # This is the same pattern used by Kubernetes liveness probes.
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout:  10s
       retries:  3
-      start_period: 10s
+      start_period: 15s   # give uvicorn a moment to boot before the first check
 
-# Named volume declaration — Docker manages the storage location on the host.
-# Run `docker volume inspect cloud-resource-manager_db_data` to find the path.
 volumes:
   db_data:
+
