@@ -1,209 +1,138 @@
-
 # ☁️ Cloud Resource Lifecycle Manager
 
-A **cloud-native REST API** that simulates the full lifecycle of cloud resources — provisioning, governance, and deprovisioning — using the same patterns found in real cloud control planes (AWS EC2/S3, GCP Compute, Azure ARM).
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-dashboard-brightgreen)](https://cloud-resource-manager-n2f4.onrender.com/dashboard/ui)
+[![API Docs](https://img.shields.io/badge/API-Swagger%20docs-blue)](https://cloud-resource-manager-n2f4.onrender.com/docs)
+[![CI](https://img.shields.io/github/actions/workflow/status/ad-kat/cloud-resource-manager/ci.yml?label=tests)](https://github.com/ad-kat/cloud-resource-manager/actions)
 
-Built with **Python · FastAPI · SQLite · Docker · docker-compose**.  
-Runs entirely locally — no cloud account, no paid tools, no licences required.
+**Live demo:** https://cloud-resource-manager-n2f4.onrender.com/dashboard/ui  
+**API docs:** https://cloud-resource-manager-n2f4.onrender.com/docs
+
+> Free tier — first request after inactivity may take ~30 seconds to wake up.
+
+A REST API that models cloud resource lifecycle — provisioning, governance, cost tracking, and drift detection. Built to mirror the patterns used by real cloud governance tools like AWS Config and GCP Asset Inventory, minus the managed service layer.
+
+---
+
+## What it does
+
+- **Provision and deprovision** cloud resources (VMs, buckets, functions, databases) with enforced policy tag requirements
+- **Track cost** per resource and per cost-centre, with projected monthly spend and configurable budget alerts
+- **Detect drift** via a background policy enforcement engine that auto-stops resources past their TTL and flags anything stuck in `provisioning`
+- **Audit trail** — every state change is written to an append-only events table; nothing is ever hard-deleted
+- **Live dashboard** at `/dashboard/ui` showing resource counts, cost breakdowns, stale resource flags, and a real-time audit feed
+
+---
+
+## Stack
+
+| Layer | Technology |
+|---|---|
+| API | Python 3.12, FastAPI, Pydantic v2 |
+| Database | PostgreSQL 16 (JSONB policy tags) |
+| ORM / queries | SQLAlchemy 2.0 (raw SQL via `text()`) |
+| Background jobs | APScheduler — drift detection every 5 min |
+| Containers | Docker, docker-compose with health-gated startup |
+| Testing | pytest — 14 tests, SQLite in-memory (no Postgres needed) |
+| CI | GitHub Actions — runs test suite on every push |
+| Deployment | Render (Docker runtime, free tier) |
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     docker-compose                          │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐    │
-│  │              api container  (:8000)                 │    │
-│  │                                                     │    │
-│  │   HTTP Request                                      │    │
-│  │       │                                             │    │
-│  │       ▼                                             │    │
-│  │  ┌──────────┐    route     ┌──────────────────────┐ │    │
-│  │  │  FastAPI │ ──────────►  │  resources router    │ │    │
-│  │  │  (ASGI)  │              │  POST   /resources   │ │    │
-│  │  │  Uvicorn │              │  GET    /resources   │ │    │
-│  │  └──────────┘              │  GET    /resources/id│ │    │
-│  │                            │  PATCH  /../policy   │ │    │ 
-│  │                            │  DELETE /resources/id│ │    │
-│  │                            └──────────┬───────────┘ │    │
-│  │                                       │ SQL         │    │
-│  │                                       ▼             │    │
-│  │                            ┌──────────────────────┐ │    │
-│  │                            │   SQLite (resources  │ │    │ 
-│  │                            │   .db on named       │ │    │
-│  │                            │   Docker volume)     │ │    │
-│  │                            └──────────────────────┘ │    │
-│  └─────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
-          ▲
-          │  curl / Postman / browser
-          │
-       localhost:8000
-```
-
-### Key design decisions
-
-| Decision | Rationale |
-|---|---|
-| **FastAPI** (not Flask/Django) | Async-first, automatic OpenAPI docs, Pydantic validation — mirrors real microservice stacks |
-| **SQLite** (not Postgres) | Zero external dependencies; single-file DB perfect for a containerised demo |
-| **Soft-delete** on deprovision | Real cloud platforms keep audit trails; hard-deleting billing records is an anti-pattern |
-| **Non-root container user** | Security best practice; mirrors production Kubernetes pod security contexts |
-| **Multi-stage Dockerfile** | Smaller final image; pip cache discarded after build |
-| **Named Docker volume** | DB persists across `docker compose down / up` cycles |
-| **Health check endpoint** | `/health` liveness probe mirrors Kubernetes health-check patterns |
-
----
-
-## Resource data model
-
-```
-Resource
-├── id           UUID (auto-generated)
-├── name         string
-├── type         "vm" | "bucket" | "function"
-├── status       "active" | "stopped" | "deprovisioned"
-├── owner        string (email / username)
-├── policy_tags  JSON object  { "env": "prod", "cost-centre": "eng" }
-├── region       string  (default "us-east-1")
-├── created_at   UTC timestamp
-└── updated_at   UTC timestamp
+┌─────────────────────────────────────────────┐
+│              docker-compose network         │
+│                                             │
+│  ┌──────────────────────────────────────┐   │
+│  │           api container              │   │
+│  │  FastAPI · uvicorn · port 8000       │   │
+│  │                                      │   │
+│  │  /resources   /cost   /dashboard     │   │
+│  │  SQLAlchemy connection pool          │   │
+│  │  APScheduler (drift · TTL · 5 min)   │   │
+│  └──────────────┬───────────────────────┘   │
+│                 │ depends_on: healthy       │
+│  ┌──────────────▼───────────────────────┐   │
+│  │            db container              │   │
+│  │  postgres:16-alpine · port 5432      │   │
+│  │                                      │   │
+│  │  resources   events   budget_alerts  │   │
+│  └──────────────────────────────────────┘   │
+└─────────────────────────────────────────────┘
 ```
 
 ---
 
-## API endpoints
+## Running locally
 
-| Method  | Path                     | Description 
-|---------|--------------------------|-------------
-| `POST`  | `/resources`             | Provision a new resource (status → **active**) 
-| `GET`   | `/resources`             | List all resources (filter by `?type=`, `?status=`, `?owner=`) 
-| `GET`   | `/resources/{id}`        | Get one resource by ID 
-| `PATCH` | `/resources/{id}/policy` | Update policy tags and/or status 
-| `DELETE`| `/resources/{id}`        | Deprovision (status → **deprovisioned**, audit record kept) 
-| `GET`   | `/health`                | Liveness probe 
-| `GET`   | `/docs`                  | Interactive OpenAPI UI (Swagger) 
-
----
-
-## Quick-start (local, no Docker)
+**Prerequisites:** Docker, docker-compose, Python 3.10+
 
 ```bash
-
 git clone https://github.com/ad-kat/cloud-resource-manager.git
 cd cloud-resource-manager
 
-python3 -m venv .venv
-source .venv/bin/activate
+# start everything (builds image, starts postgres, runs migrations)
+docker compose up --build
+
+# API is live at http://localhost:8000
+# Swagger docs  http://localhost:8000/docs
+# Dashboard     http://localhost:8000/dashboard/ui
+```
+
+**Running tests** (no Docker needed — uses SQLite):
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000 # 3. Run the development server
-
-# 4. Open the interactive API docs → http://localhost:8000/docs
-```
----
-
-## Quick-start (Docker / docker-compose)
-
-```bash
-
-docker compose up --build -d
-docker compose ps
-docker compose logs api
-docker compose down
+pytest tests/ -v
 ```
 
 ---
 
-## curl test walkthrough
+## API overview
 
-### 1 — Provision a VM
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/resources/` | Provision a resource (requires `env` + `cost-centre` tags) |
+| GET | `/resources/` | List resources — filterable by type, status, owner |
+| GET | `/resources/{id}` | Get a single resource |
+| PATCH | `/resources/{id}/policy` | Update policy tags or status |
+| DELETE | `/resources/{id}` | Deprovision (soft delete — status → deprovisioned) |
+| GET | `/resources/{id}/events` | Full audit trail for a resource |
+| GET | `/cost/estimate/{id}` | Accrued cost + projected monthly for one resource |
+| GET | `/cost/by-cost-centre` | Cost breakdown grouped by cost-centre tag |
+| POST | `/cost/budgets` | Set a monthly spend limit for a cost-centre |
+| GET | `/cost/budgets/alerts` | Check which cost-centres are approaching their limit |
+| GET | `/dashboard/` | JSON operational snapshot |
+| GET | `/dashboard/ui` | HTML dashboard (resource counts, cost, audit feed) |
 
-```bash
-curl -s -X POST http://localhost:8000/resources \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "web-server-01",
-    "type": "vm",
-    "owner": "alice@example.com",
-    "policy_tags": {"env": "prod", "cost-centre": "eng-platform"},
-    "region": "us-east-1"
-  }' | python3 -m json.tool
-```
+Full interactive docs at `/docs` (auto-generated by FastAPI).
 
-Expected response (HTTP 201):
-```json
-{
-  "id": "a1b2c3d4-...",
-  "name": "web-server-01",
-  "type": "vm",
-  "status": "active",
-  "owner": "alice@example.com",
-  "policy_tags": {"env": "prod", "cost-centre": "eng-platform"},
-  "region": "us-east-1",
-  "created_at": "2025-...",
-  "updated_at": "2025-..."
-}
-```
+---
 
-### 2 — Provision a bucket
+## Key design decisions
 
-```bash
-curl -s -X POST http://localhost:8000/resources \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "logs-bucket",
-    "type": "bucket",
-    "owner": "alice@example.com",
-    "policy_tags": {"env": "prod", "retention": "90d"}
-  }' | python3 -m json.tool
-```
+**Policy tag enforcement** — every resource must carry `env` and `cost-centre` tags at creation time. Requests missing either tag are rejected with a 422 before touching the database. This mirrors mandatory tagging policies used in real cloud governance.
 
-### 3 — List all resources
+**Soft deletes only** — deprovisioning sets `status = deprovisioned`, it never removes a row. The audit trail stays intact. This is the correct pattern for anything that needs compliance history.
 
-```bash
-curl -s http://localhost:8000/resources | python3 -m json.tool
-```
+**Health-gated startup** — the API container won't start until Postgres passes its own Docker healthcheck (`depends_on: condition: service_healthy`). Without this the app crashes on boot because the database isn't ready yet.
 
-### 4 — Filter by type and status
+**SQLite for tests** — the test suite uses SQLite via the `DATABASE_URL` environment variable, so no Postgres container is needed in CI or local development. All 14 tests run in under 10 seconds.
 
-```bash
-curl -s "http://localhost:8000/resources?type=vm&status=active" | python3 -m json.tool
-```
+**Hourly rates** mirror AWS on-demand pricing at order-of-magnitude level (vm: $0.096/hr, database: $0.115/hr, bucket: $0.023/hr). The point is the pattern, not the exact numbers.
 
-### 5 — Update policy tags and stop the VM
-Replace `RESOURCE_ID` with the `id` from step 1.
+---
 
-```bash
-curl -s -X PATCH http://localhost:8000/resources/RESOURCE_ID/policy \
-  -H "Content-Type: application/json" \
-  -d '{
-    "policy_tags": {"env": "staging", "reviewed": "true"},
-    "status": "stopped"
-  }' | python3 -m json.tool
-```
+## Drift detection rules
 
-### 6 — Deprovision the resource
+The scheduler runs `_enforce_policies()` every 5 minutes and applies two rules:
 
-```bash
-curl -s -X DELETE http://localhost:8000/resources/RESOURCE_ID | python3 -m json.tool
-```
+1. **TTL breach** — if a resource has `ttl_hours` set and has been active past that threshold, it is automatically stopped and a `ttl_enforced` audit event is written
+2. **Stuck provisioning** — if a resource has been in `provisioning` status for more than 10 minutes, a `drift_detected` event is written for manual review
 
-Expected response (HTTP 200):
-```json
-{
-  "message": "Resource 'web-server-01' has been deprovisioned.",
-  "resource_id": "a1b2c3d4-..."
-}
-```
-
-### 7 — Verify the audit record is preserved
-
-```bash
-curl -s http://localhost:8000/resources/RESOURCE_ID | python3 -m json.tool
-# status will be "deprovisioned" — record kept for audit trail
-```
+This is the same reconciliation loop pattern used by AWS Config rules and GCP Asset Inventory policies.
 
 ---
 
@@ -212,18 +141,20 @@ curl -s http://localhost:8000/resources/RESOURCE_ID | python3 -m json.tool
 ```
 cloud-resource-manager/
 ├── app/
-│   ├── __init__.py         # Python package marker
-│   ├── main.py             # FastAPI app, startup lifespan, router mount
-│   ├── database.py         # SQLite connection + schema initialisation
-│   ├── models.py           # Pydantic request/response models + enums
+│   ├── main.py          # FastAPI app, lifespan, router registration
+│   ├── database.py      # SQLAlchemy engine, session factory, init_db
+│   ├── models.py        # Pydantic request/response models
+│   ├── scheduler.py     # APScheduler policy enforcement engine
 │   └── routers/
-│       ├── __init__.py
-│       └── resources.py    # All CRUD endpoint handlers
-├── Dockerfile              # Multi-stage build, non-root user
-├── docker-compose.yml      # Service definition, port mapping, named volume
-├── requirements.txt        # Pinned dependencies
-├── .gitignore
-└── README.md
+│       ├── resources.py # Lifecycle CRUD endpoints
+│       ├── cost.py      # Cost estimation + budget alerts
+│       └── dashboard.py # Operational snapshot (JSON + HTML)
+├── tests/
+│   ├── conftest.py      # SQLite fixtures, client setup
+│   └── test_resources.py
+├── Dockerfile           # Multi-stage build, non-root user
+├── docker-compose.yml   # api + db services, health-gated startup
+└── requirements.txt
 ```
 
 ---
@@ -231,52 +162,13 @@ cloud-resource-manager/
 ## Tech stack (all free and open source)
 
 | Tool | Licence | Purpose |
-|------|---------|---------|
+|---|---|---|
 | Python 3.12 | PSF | Runtime |
 | FastAPI 0.111 | MIT | Web framework |
 | Uvicorn 0.29 | BSD | ASGI server |
-| Pydantic v2 | MIT | Data validation & serialisation |
-| SQLite 3 | Public domain | Embedded database |
+| Pydantic v2 | MIT | Data validation |
+| SQLAlchemy 2.0 | MIT | Database access |
+| PostgreSQL 16 | PostgreSQL | Primary database |
+| APScheduler 3.10 | MIT | Background scheduler |
 | Docker Engine | Apache 2.0 | Container runtime |
 | docker-compose v2 | Apache 2.0 | Local orchestration |
-
----
-
-## Installing Docker Engine on WSL2 Ubuntu (no Docker Desktop needed)
-
-```bash
-# 1. Remove any old versions
-sudo apt-get remove -y docker docker-engine docker.io containerd runc
-
-# 2. Install prerequisites
-sudo apt-get update
-sudo apt-get install -y ca-certificates curl gnupg lsb-release
-
-# 3. Add Docker's official GPG key
-sudo mkdir -p /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
-  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-
-# 4. Add the stable repository
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-  https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
-  | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-
-# 5. Install Docker Engine + Compose plugin
-sudo apt-get update
-sudo apt-get install -y docker-ce docker-ce-cli containerd.io \
-                        docker-buildx-plugin docker-compose-plugin
-
-# 6. Start the daemon (WSL2 uses service, not systemctl)
-sudo service docker start
-
-# 7. Allow your user to run docker without sudo
-sudo usermod -aG docker $USER
-newgrp docker          # apply group change in current shell
-
-# 8. Verify
-docker --version       # Docker version 26.x.x
-docker compose version # Docker Compose version v2.x.x
-docker run hello-world
-```
