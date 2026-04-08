@@ -219,3 +219,59 @@ def check_budget_alerts(db: Session = Depends(get_db)):
             })
 
     return {"alerts": alerts, "triggered": len(alerts)}
+
+
+@router.get("/rates", summary="Show current pricing rates in use")
+def get_current_rates():
+    """
+    Shows what hourly rates the system is currently using for cost estimation.
+    Pulled from the AWS Pricing API on startup (with fallback to static rates).
+    Useful for debugging why your bill looks weird.
+    """
+    from app.pricing import get_all_rates, _last_refresh, FALLBACK_RATES
+    import time
+
+    rates    = get_all_rates()
+    age_secs = int(time.time() - _last_refresh) if _last_refresh > 0 else None
+
+    return {
+        "rates":          {k: f"${v:.6f}/hr" for k, v in rates.items()},
+        "source":         "AWS Pricing API (with fallback to static rates)",
+        "cache_age_secs": age_secs,
+        "fallback_rates": {k: f"${v:.6f}/hr" for k, v in FALLBACK_RATES.items()},
+        "note":           "Rates cached for 6 hours, refreshed in background on startup.",
+    }
+
+
+def _fire_webhook(alert: dict):
+    """
+    Fires a POST to ALERT_WEBHOOK_URL if configured.
+    Slack, Teams, PagerDuty, your mate's Discord server — doesn't matter,
+    anything that accepts a JSON POST works here.
+    """
+    import os
+    import json
+    import urllib.request
+
+    webhook_url = os.getenv("ALERT_WEBHOOK_URL", "")
+    if not webhook_url:
+        return  # not configured, that's fine
+
+    payload = json.dumps({
+        "text":    alert["message"],
+        "alert":   alert,
+        "service": "cloud-resource-manager",
+    }).encode()
+
+    try:
+        req = urllib.request.Request(
+            webhook_url,
+            data=payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=5)
+        logger.info("Webhook fired for cost-centre '%s'", alert["cost_centre"])
+    except Exception as e:
+        # webhook failure should never break the main response
+        logger.warning("Webhook POST failed: %s", e)

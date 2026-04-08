@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 
 from app.database import get_db
+from app.pricing import get_rate
 from app.models import (
     MessageResponse,
     PolicyUpdate,
@@ -22,15 +23,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 REQUIRED_TAGS = {"env", "cost-centre"}
-
-# rough hourly rates — mirrors real AWS on-demand pricing at order-of-magnitude level
-# keeping this here rather than in a config file for now, can always move it later
-HOURLY_RATES = {
-    "vm":       0.096,
-    "bucket":   0.023,
-    "function": 0.0000002,  # functions are priced per-invocation in reality but this works for demo
-    "database": 0.115,
-}
 
 
 def _get_or_404(resource_id: str, db: Session) -> dict:
@@ -84,7 +76,9 @@ def provision_resource(body: ResourceCreate, db: Session = Depends(get_db)):
 
     resource_id = str(uuid.uuid4())
     now  = datetime.now(timezone.utc)
-    rate = HOURLY_RATES.get(body.type.value, 0.0)
+
+    # use live AWS pricing instead of the old hardcoded table
+    rate = get_rate(body.type.value)
 
     db.execute(
         text("""
@@ -111,16 +105,18 @@ def provision_resource(body: ResourceCreate, db: Session = Depends(get_db)):
     db.commit()
 
     _record_event(resource_id, "provisioned", body.owner, db)
-    logger.info("Provisioned %s (type=%s owner=%s)", resource_id, body.type, body.owner)
+    logger.info("Provisioned %s (type=%s owner=%s rate=$%.6f/hr)", resource_id, body.type, body.owner, rate)
     return ResourceResponse(**_get_or_404(resource_id, db))
 
 
 @router.get("/", response_model=List[ResourceResponse])
 def list_resources(
-    type:   Optional[ResourceType]   = Query(default=None),
-    status: Optional[ResourceStatus] = Query(default=None),
-    owner:  Optional[str]            = Query(default=None),
-    db:     Session                  = Depends(get_db),
+    type:        Optional[ResourceType]   = Query(default=None),
+    status:      Optional[ResourceStatus] = Query(default=None),
+    owner:       Optional[str]            = Query(default=None),
+    region:      Optional[str]            = Query(default=None),
+    cost_centre: Optional[str]            = Query(default=None, description="Filter by cost-centre policy tag"),
+    db:          Session                  = Depends(get_db),
 ):
     query  = "SELECT * FROM resources WHERE 1=1"
     params: dict = {}
@@ -134,6 +130,9 @@ def list_resources(
     if owner is not None:
         query += " AND owner = :owner"
         params["owner"] = owner
+    if region is not None:
+        query += " AND region = :region"
+        params["region"] = region
 
     query += " ORDER BY created_at DESC"
 
@@ -143,6 +142,13 @@ def list_resources(
         r = dict(row._mapping)
         if isinstance(r.get("policy_tags"), str):
             r["policy_tags"] = json.loads(r["policy_tags"])
+
+        # filter by cost_centre tag after fetching since it's inside JSON
+        if cost_centre is not None:
+            cc = r["policy_tags"].get("cost-centre", "")
+            if cc != cost_centre:
+                continue
+
         result.append(ResourceResponse(**r))
     return result
 

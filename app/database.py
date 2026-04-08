@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
@@ -36,8 +37,7 @@ def get_db() -> Session:
 
 def init_db() -> None:
     with engine.connect() as conn:
-        # main resource table — added cost_per_hr and ttl_hours vs the old schema
-        # JSONB gives us native JSON querying in postgres (can't do this with TEXT)
+        # main resource table
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS resources (
                 id            TEXT          PRIMARY KEY,
@@ -78,5 +78,25 @@ def init_db() -> None:
                 updated_at      TIMESTAMPTZ   NOT NULL
             )
         """))
+
+        # api keys — we store hashes only, never the raw key
+        # is_active lets us revoke without deleting (audit trail and all that)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id          TEXT        PRIMARY KEY,
+                name        TEXT        NOT NULL,
+                key_hash    TEXT        NOT NULL UNIQUE,
+                is_active   BOOLEAN     NOT NULL DEFAULT true,
+                created_at  TIMESTAMPTZ NOT NULL
+            )
+        """))
+
         conn.commit()
     logger.info("Database tables ready.")
+
+    # kick off a background pricing refresh so rates are warm before first request
+    # doing it in a thread so we don't block startup — fallback rates cover the gap
+    from app.pricing import refresh_rates
+    t = threading.Thread(target=refresh_rates, daemon=True)
+    t.start()
+    logger.info("AWS pricing refresh started in background.")
