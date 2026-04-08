@@ -48,7 +48,7 @@ app.include_router(auth.router,      prefix="/auth",      tags=["Auth"])
 app.include_router(export.router,    prefix="/export",    tags=["Export"])
 
 
-@app.get("/", tags=["Health"])
+@app.api_route("/", methods=["GET", "HEAD"], tags=["Health"])
 def root():
     return {
         "service":   "Cloud Resource Lifecycle Manager",
