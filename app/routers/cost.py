@@ -243,6 +243,54 @@ def get_current_rates():
     }
 
 
+@router.get("/forecast", summary="Project future costs from current burn rate")
+def cost_forecast(days: int = 30, db: Session = Depends(get_db)):
+    import numpy as np
+    from collections import defaultdict
+
+    active = db.execute(text(
+        "SELECT cost_per_hr, policy_tags, created_at FROM resources WHERE status='active'"
+    )).fetchall()
+
+    active   = [dict(r._mapping) for r in active]
+    burn_per_hr = sum(float(r["cost_per_hr"]) for r in active)
+
+    by_cc: dict = {}
+    for r in active:
+        tags = json.loads(r["policy_tags"]) if isinstance(r["policy_tags"], str) else r["policy_tags"]
+        cc   = tags.get("cost-centre", "untagged")
+        by_cc[cc] = round(by_cc.get(cc, 0) + float(r["cost_per_hr"]) * days * 24, 2)
+
+    all_rows = [dict(r._mapping) for r in db.execute(text("SELECT created_at FROM resources ORDER BY created_at")).fetchall()]
+    daily: dict = defaultdict(int)
+    for r in all_rows:
+        ts = r["created_at"]
+        if isinstance(ts, str):
+            ts = datetime.fromisoformat(ts.replace(" ", "T"))
+        daily[ts.date().isoformat()] += 1
+
+    growth_per_day = 0.0
+    if len(daily) >= 2:
+        days_sorted = sorted(daily)
+        y = np.cumsum([daily[d] for d in days_sorted]).astype(float)
+        slope, _ = np.polyfit(np.arange(len(y)), y, 1)
+        growth_per_day = round(float(slope), 3)
+
+    return {
+        "current_active":   len(active),
+        "burn_rate_per_hr": round(burn_per_hr, 4),
+        "forecast_days":    days,
+        "projected_cost":   round(burn_per_hr * days * 24, 2),
+        "by_cost_centre":   by_cc,
+        "growth_per_day":   growth_per_day,
+        "scenarios": {
+            "7d":  round(burn_per_hr * 7  * 24, 2),
+            "30d": round(burn_per_hr * 30 * 24, 2),
+            "90d": round(burn_per_hr * 90 * 24, 2),
+        }
+    }
+
+
 def _fire_webhook(alert: dict):
     """
     Fires a POST to ALERT_WEBHOOK_URL if configured.

@@ -110,6 +110,11 @@ def dashboard_html(db: Session = Depends(get_db)):
         for e in data["recent_events"]
     ) or "<tr><td colspan='4' class='muted' style='padding:1rem'>No events yet</td></tr>"
 
+    from app.routers.cost import cost_forecast
+    forecast = cost_forecast(days=90, db=db)
+    f_labels = json.dumps(["Now", "7 days", "30 days", "90 days"])
+    f_values = json.dumps([0, forecast["scenarios"]["7d"], forecast["scenarios"]["30d"], forecast["scenarios"]["90d"]])
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -163,7 +168,7 @@ code{{background:rgb(var(--c-panel2));padding:.1rem .4rem;border-radius:4px;font
   <div class="chart-wrap"><h2>By Status</h2><div class="ch"><canvas id="statusChart"></canvas></div></div>
 </div>
 <div class="chart-wrap"><h2>Projected Monthly Cost by Cost-Centre (USD)</h2><div class="ch" style="height:250px"><canvas id="ccChart"></canvas></div></div>
-
+<div class="chart-wrap"><h2>Cost Forecast: 90 Day Projection (USD)</h2><div class="ch" style="height:250px"><canvas id="forecastChart"></canvas></div></div>
 <section style="margin-top:1rem">
   <h2>Budget Alerts</h2>
   {alerts_html}
@@ -197,6 +202,30 @@ function buildCharts(){{
   charts.push(mkChart('typeChart',  'doughnut',{tl},{tv},C));
   charts.push(mkChart('statusChart','doughnut',{sl},{sv},C));
   charts.push(mkChart('ccChart',    'bar',     {cl},{cv},C,true));
+  charts.push(new Chart(document.getElementById('forecastChart'),{{
+    type:'line',
+    data:{{
+      labels:{f_labels},
+      datasets:[{{
+        label:'Projected Cost (USD)',
+        data:{f_values},
+        borderColor:css('c-gold'),
+        backgroundColor:css('c-gold')+'22',
+        borderWidth:2,
+        pointBackgroundColor:css('c-gold'),
+        fill:true,
+        tension:0.4
+      }}]
+    }},
+    options:{{
+      maintainAspectRatio:false,
+      plugins:{{legend:{{display:false}}}},
+      scales:{{
+        x:{{ticks:{{color:css('c-mute')}},grid:{{color:css('c-line')}}}},
+        y:{{ticks:{{color:css('c-mute'),callback:(v)=>'$'+v}},grid:{{color:css('c-line')}}}}
+      }}
+    }}
+  }}));
 }}
 function toggleTheme(){{
   document.documentElement.classList.toggle('dark');
