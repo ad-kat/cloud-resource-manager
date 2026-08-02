@@ -14,171 +14,132 @@ pinned: false
 [![API Docs](https://img.shields.io/badge/API-Swagger%20docs-blue)](https://cloud-resource-manager-n2f4.onrender.com/docs)
 [![CI](https://img.shields.io/github/actions/workflow/status/ad-kat/cloud-resource-manager/ci.yml?label=tests)](https://github.com/ad-kat/cloud-resource-manager/actions)
 
-**Live demo:** https://cloud-resource-manager-n2f4.onrender.com/dashboard/ui  
-**API docs:** https://cloud-resource-manager-n2f4.onrender.com/docs
-
-> Free tier — first request after inactivity may take ~30 seconds to wake up.
-
-A REST API that models cloud resource lifecycle — provisioning, governance, cost tracking, and drift detection. Built to mirror the patterns used by real cloud governance tools like AWS Config and GCP Asset Inventory, minus the managed service layer.
+A production-patterned REST API for managing cloud resource lifecycles : with **live Azure pricing**, automated governance, cost forecasting, and a real-time dashboard. Built with FastAPI, SQLite, Docker, and deployed on Render.
 
 ---
 
-## What it does
+## What it solves
 
-- **Provision and deprovision** cloud resources (VMs, buckets, functions, databases) with enforced policy tag requirements
-- **Track cost** per resource and per cost-centre, with projected monthly spend and configurable budget alerts
-- **Detect drift** via a background policy enforcement engine that auto-stops resources past their TTL and flags anything stuck in `provisioning`
-- **Audit trail** — every state change is written to an append-only events table; nothing is ever hard-deleted
-- **Live dashboard** at `/dashboard/ui` showing resource counts, cost breakdowns, stale resource flags, and a real-time audit feed
+Companies lose thousands of dollars monthly on forgotten cloud resources : VMs nobody uses, databases nobody queries, buckets full of stale test data. This system tracks every resource's lifecycle, enforces TTL-based auto-stop policies, projects monthly costs by department, and alerts when budgets are exceeded. The same patterns are used in production FinOps tools like Kubecost and Infracost.
 
 ---
 
-## Stack
+## Features
 
-| Layer | Technology |
+**Live Azure pricing** : fetches real hourly rates from the Azure Retail Pricing API on startup (free, no account or API key required). Cached for 6 hours with static fallback if unreachable. No more hardcoded fake rates.
+
+**Resource lifecycle management** : create, update, and deprovision cloud resources (VM, bucket, function, database) with full state tracking across four states: `provisioning → active → stopped → deprovisioned`.
+
+**TTL enforcement** : a background APScheduler job runs every 5 minutes and automatically stops any resource that has exceeded its configured TTL. No human intervention required.
+
+**Audit trail** : every state change is written to an `events` table with timestamp, actor, and action. Full history for security, billing disputes, and compliance.
+
+**Cost forecasting** : `GET /cost/forecast` uses numpy linear regression on historical resource creation patterns to project 7/30/90-day spend scenarios, broken down by cost-centre.
+
+**Budget alerts** : set monthly limits per cost-centre. The system calculates utilisation and fires webhook alerts (Slack, Teams, Discord) when approaching or exceeding limits.
+
+**Real-time dashboard** : Chart.js doughnut and bar charts showing resource breakdown by type and status, projected monthly cost by cost-centre, a 90-day forecast line chart, budget alert panel, and audit event feed. Auto-refreshes every 30 seconds. Light/dark theme toggle.
+
+**Chargeback reports** : `GET /cost/by-cost-centre` groups spend by department tag for finance teams.
+
+**Prometheus metrics** : request counts and latency exposed at `/metrics` for observability tooling.
+
+---
+
+## Architecture Diagram
+![Architecture](architecture.svg)
+
+---
+
+## Tech stack
+
+| Layer | Tool |
 |---|---|
-| API | Python 3.12, FastAPI, Pydantic v2 |
-| Database | PostgreSQL 16 (JSONB policy tags) |
-| ORM / queries | SQLAlchemy 2.0 (raw SQL via `text()`) |
-| Background jobs | APScheduler — drift detection every 5 min |
-| Containers | Docker, docker-compose with health-gated startup |
-| Testing | pytest — 14 tests, SQLite in-memory (no Postgres needed) |
-| CI | GitHub Actions — runs test suite on every push |
-| Deployment | Render (Docker runtime, free tier) |
+| Framework | FastAPI (Python 3.12) |
+| Database | SQLite (Postgres supported via `DATABASE_URL` env var) |
+| Background jobs | APScheduler |
+| Cost forecasting | NumPy linear regression |
+| Dashboard | Chart.js via CDN |
+| Metrics | Prometheus via FastAPI instrumentator |
+| Containerisation | Docker + docker-compose |
+| Deployment | Render (free tier) |
 
 ---
 
-## Architecture
+## API endpoints
 
-```
-┌─────────────────────────────────────────────┐
-│              docker-compose network         │
-│                                             │
-│  ┌──────────────────────────────────────┐   │
-│  │           api container              │   │
-│  │  FastAPI · uvicorn · port 8000       │   │
-│  │                                      │   │
-│  │  /resources   /cost   /dashboard     │   │
-│  │  SQLAlchemy connection pool          │   │
-│  │  APScheduler (drift · TTL · 5 min)   │   │
-│  └──────────────┬───────────────────────┘   │
-│                 │ depends_on: healthy       │
-│  ┌──────────────▼───────────────────────┐   │
-│  │            db container              │   │
-│  │  postgres:16-alpine · port 5432      │   │
-│  │                                      │   │
-│  │  resources   events   budget_alerts  │   │
-│  └──────────────────────────────────────┘   │
-└─────────────────────────────────────────────┘
-```
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/resources/` | Provision a new resource |
+| `GET` | `/resources/` | List all resources |
+| `GET` | `/resources/{id}` | Get a specific resource |
+| `PATCH` | `/resources/{id}/policy` | Update status or tags |
+| `DELETE` | `/resources/{id}` | Deprovision a resource |
+| `GET` | `/cost/rates` | Current live Azure pricing rates |
+| `GET` | `/cost/estimate/{id}` | Cost accrued + projected monthly for one resource |
+| `GET` | `/cost/by-cost-centre` | Chargeback report grouped by department |
+| `POST` | `/cost/budgets` | Set monthly budget for a cost-centre |
+| `GET` | `/cost/budgets/alerts` | Active budget threshold alerts |
+| `GET` | `/cost/forecast` | 7/30/90-day cost projection with linear regression |
+| `GET` | `/dashboard/ui` | Live HTML dashboard with charts |
+| `GET` | `/dashboard/` | Dashboard JSON snapshot |
+| `GET` | `/export/cost-report` | CSV cost report export |
+| `GET` | `/export/audit-log` | CSV full audit log export |
+| `GET` | `/metrics` | Prometheus metrics endpoint |
+| `GET` | `/health` | Health check |
 
 ---
 
 ## Running locally
 
-**Prerequisites:** Docker, docker-compose, Python 3.10+
-
 ```bash
-git clone https://github.com/ad-kat/cloud-resource-manager.git
+git clone https://github.com/ad-kat/cloud-resource-manager
 cd cloud-resource-manager
-
-# start everything (builds image, starts postgres, runs migrations)
 docker compose up --build
-
-# API is live at http://localhost:8000
-# Swagger docs  http://localhost:8000/docs
-# Dashboard     http://localhost:8000/dashboard/ui
 ```
 
-**Running tests** (no Docker needed — uses SQLite):
+Visit `http://localhost:8000/dashboard/ui` for the live dashboard.  
+Visit `http://localhost:8000/docs` for the interactive Swagger UI.
 
-```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-pytest tests/ -v
-```
+No Postgres or external services required : SQLite runs automatically.
 
 ---
 
-## API overview
+## Configuration
 
-| Method | Endpoint | Description |
+| Variable | Default | Description |
 |---|---|---|
-| POST | `/resources/` | Provision a resource (requires `env` + `cost-centre` tags) |
-| GET | `/resources/` | List resources — filterable by type, status, owner |
-| GET | `/resources/{id}` | Get a single resource |
-| PATCH | `/resources/{id}/policy` | Update policy tags or status |
-| DELETE | `/resources/{id}` | Deprovision (soft delete — status → deprovisioned) |
-| GET | `/resources/{id}/events` | Full audit trail for a resource |
-| GET | `/cost/estimate/{id}` | Accrued cost + projected monthly for one resource |
-| GET | `/cost/by-cost-centre` | Cost breakdown grouped by cost-centre tag |
-| POST | `/cost/budgets` | Set a monthly spend limit for a cost-centre |
-| GET | `/cost/budgets/alerts` | Check which cost-centres are approaching their limit |
-| GET | `/dashboard/` | JSON operational snapshot |
-| GET | `/dashboard/ui` | HTML dashboard (resource counts, cost, audit feed) |
-
-Full interactive docs at `/docs` (auto-generated by FastAPI).
+| `DATABASE_URL` | `sqlite:///./resources.db` | SQLite (default) or Postgres connection string |
+| `ALERT_WEBHOOK_URL` | _(unset)_ | Slack/Teams/Discord webhook for budget alerts |
 
 ---
 
-## Key design decisions
+## Design decisions
 
-**Policy tag enforcement** — every resource must carry `env` and `cost-centre` tags at creation time. Requests missing either tag are rejected with a 422 before touching the database. This mirrors mandatory tagging policies used in real cloud governance.
+**SQLite over Postgres** : eliminates external dependencies for local development and free-tier deployment. Postgres is supported by switching `DATABASE_URL`... the rest of the codebase is unchanged. In production you'd use managed Postgres or Aurora.
 
-**Soft deletes only** — deprovisioning sets `status = deprovisioned`, it never removes a row. The audit trail stays intact. This is the correct pattern for anything that needs compliance history.
+**Azure Retail API over AWS** : the Azure pricing API is completely public (no account, no API key, small filtered JSON responses). AWS pricing JSON is 500MB+, which crashes free-tier deployments.
 
-**Health-gated startup** — the API container won't start until Postgres passes its own Docker healthcheck (`depends_on: condition: service_healthy`). Without this the app crashes on boot because the database isn't ready yet.
+**APScheduler over a cron job** : runs inside the same process as the API, keeping the deployment a single container with no external scheduler dependency.
 
-**SQLite for tests** — the test suite uses SQLite via the `DATABASE_URL` environment variable, so no Postgres container is needed in CI or local development. All 14 tests run in under 10 seconds.
-
-**Hourly rates** mirror AWS on-demand pricing at order-of-magnitude level (vm: $0.096/hr, database: $0.115/hr, bucket: $0.023/hr). The point is the pattern, not the exact numbers.
-
----
-
-## Drift detection rules
-
-The scheduler runs `_enforce_policies()` every 5 minutes and applies two rules:
-
-1. **TTL breach** — if a resource has `ttl_hours` set and has been active past that threshold, it is automatically stopped and a `ttl_enforced` audit event is written
-2. **Stuck provisioning** — if a resource has been in `provisioning` status for more than 10 minutes, a `drift_detected` event is written for manual review
-
-This is the same reconciliation loop pattern used by AWS Config rules and GCP Asset Inventory policies.
+**Numpy forecasting** : uses `polyfit` on cumulative resource counts to estimate growth rate, then projects spend forward. Simple, dependency-light, and explainable.
 
 ---
 
 ## Project structure
 
 ```
-cloud-resource-manager/
-├── app/
-│   ├── main.py          # FastAPI app, lifespan, router registration
-│   ├── database.py      # SQLAlchemy engine, session factory, init_db
-│   ├── models.py        # Pydantic request/response models
-│   ├── scheduler.py     # APScheduler policy enforcement engine
-│   └── routers/
-│       ├── resources.py # Lifecycle CRUD endpoints
-│       ├── cost.py      # Cost estimation + budget alerts
-│       └── dashboard.py # Operational snapshot (JSON + HTML)
-├── tests/
-│   ├── conftest.py      # SQLite fixtures, client setup
-│   └── test_resources.py
-├── Dockerfile           # Multi-stage build, non-root user
-├── docker-compose.yml   # api + db services, health-gated startup
-└── requirements.txt
+app/
+├── main.py          : FastAPI app, startup lifecycle
+├── database.py      : SQLAlchemy engine, schema init, SQLite/Postgres support
+├── models.py        : Pydantic request/response schemas
+├── pricing.py       : Azure Retail API integration, rate cache
+├── scheduler.py     : APScheduler TTL enforcement job
+└── routers/
+    ├── resources.py : Resource CRUD + policy enforcement
+    ├── cost.py      : Cost estimation, budgets, forecasting
+    ├── dashboard.py : HTML dashboard + JSON snapshot
+    ├── auth.py      : JWT authentication
+    ├── export.py    : CSV exports
+    └── metrics.py   : Prometheus instrumentation
 ```
-
----
-
-## Tech stack (all free and open source)
-
-| Tool | Licence | Purpose |
-|---|---|---|
-| Python 3.12 | PSF | Runtime |
-| FastAPI 0.111 | MIT | Web framework |
-| Uvicorn 0.29 | BSD | ASGI server |
-| Pydantic v2 | MIT | Data validation |
-| SQLAlchemy 2.0 | MIT | Database access |
-| PostgreSQL 16 | PostgreSQL | Primary database |
-| APScheduler 3.10 | MIT | Background scheduler |
-| Docker Engine | Apache 2.0 | Container runtime |
-| docker-compose v2 | Apache 2.0 | Local orchestration |
