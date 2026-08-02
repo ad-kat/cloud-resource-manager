@@ -9,20 +9,12 @@ logger = logging.getLogger(__name__)
 
 # pull DSN from env, fall back to a local default so plain `uvicorn app.main:app`
 # still works without docker if you have postgres running locally
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/resources"
-)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./resources.db")
 
-# pool_pre_ping drops connections that went stale while sitting idle —
-# without this you get random "server closed the connection" errors after
-# the container has been idle for a while
-engine = create_engine(
-    DATABASE_URL,
-    pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10,
-)
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True, pool_size=5, max_overflow=10)
 
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 
@@ -99,4 +91,4 @@ def init_db() -> None:
     from app.pricing import refresh_rates
     t = threading.Thread(target=refresh_rates, daemon=True)
     t.start()
-    logger.info("AWS pricing refresh started in background.")
+    logger.info("Azure pricing refresh started in background.")

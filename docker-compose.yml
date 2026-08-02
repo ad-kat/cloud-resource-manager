@@ -1,43 +1,16 @@
 services:
-
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER:     postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB:       resources
-    volumes:
-      - db_data:/var/lib/postgresql/data
-    # healthcheck lets the api service wait until postgres is actually ready
-    # before starting — without this the app crashes on boot half the time
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout:  5s
-      retries:  5
-
   api:
-    build:
-      context:    .
-      dockerfile: Dockerfile
+    build: .
     image: cloud-resource-manager:latest
     ports:
-      - "8000:8000"
+      - "8000:7860"
     environment:
-      - DATABASE_URL=postgresql://postgres:postgres@db:5432/resources
-      - PYTHONUNBUFFERED=1
-    depends_on:
-      db:
-        condition: service_healthy   # don't start until postgres passes its healthcheck
+      - DATABASE_URL=sqlite:////data/resources.db
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+             "import urllib.request; urllib.request.urlopen('http://localhost:7860/health')"]
       interval: 30s
-      timeout:  10s
-      retries:  3
-      start_period: 15s   # give uvicorn a moment to boot before the first check
-
-volumes:
-  db_data:
-
+      timeout: 10s
+      retries: 3
+      start_period: 15s

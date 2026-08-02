@@ -236,7 +236,7 @@ def get_current_rates():
 
     return {
         "rates":          {k: f"${v:.6f}/hr" for k, v in rates.items()},
-        "source":         "AWS Pricing API (with fallback to static rates)",
+        "source":         "Azure Retail Pricing API (with static fallback)",
         "cache_age_secs": age_secs,
         "fallback_rates": {k: f"${v:.6f}/hr" for k, v in FALLBACK_RATES.items()},
         "note":           "Rates cached for 6 hours, refreshed in background on startup.",

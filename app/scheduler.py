@@ -44,6 +44,8 @@ def _enforce_policies():
             resource_id = r["id"]
 
             created = r["created_at"]
+            if isinstance(created, str):
+                created = datetime.fromisoformat(created.replace(" ", "T"))
             if created.tzinfo is None:
                 # sqlite gives naive datetimes — stamp them UTC
                 created = created.replace(tzinfo=timezone.utc)

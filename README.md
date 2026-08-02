@@ -1,3 +1,13 @@
+---
+title: Cloud Resource Manager
+emoji: ☁️
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # ☁️ Cloud Resource Lifecycle Manager
 
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-dashboard-brightgreen)](https://cloud-resource-manager-n2f4.onrender.com/dashboard/ui)

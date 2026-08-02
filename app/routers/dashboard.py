@@ -1,9 +1,3 @@
-"""
-Dashboard router — two endpoints:
-  GET /dashboard/     → JSON snapshot (for programmatic consumers / future frontend)
-  GET /dashboard/ui   → rendered HTML page (for humans, screenshots, LinkedIn demo)
-"""
-
 import json
 import logging
 from datetime import datetime, timezone
@@ -17,17 +11,11 @@ from app.database import get_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
 HOURS_PER_MONTH = 730
 
 
 def _build_snapshot(db: Session) -> dict:
-    """
-    Pulls everything needed for the dashboard in a few queries.
-    Could be optimised with a single GROUP BY query later if this gets slow.
-    """
     rows = db.execute(text("SELECT * FROM resources")).fetchall()
-
     resources = []
     for row in rows:
         r = dict(row._mapping)
@@ -36,39 +24,50 @@ def _build_snapshot(db: Session) -> dict:
         resources.append(r)
 
     now = datetime.now(timezone.utc)
-
-    by_type:   dict = {}
+    by_type: dict = {}
     by_status: dict = {}
-    by_cc:     dict = {}
+    by_cc: dict = {}
     total_monthly = 0.0
-    stale_count   = 0
+    stale_count = 0
 
     for r in resources:
-        by_type[r["type"]]     = by_type.get(r["type"], 0)     + 1
+        by_type[r["type"]]     = by_type.get(r["type"], 0) + 1
         by_status[r["status"]] = by_status.get(r["status"], 0) + 1
 
-        # only count cost for resources that are still running
         if r["status"] not in ("deprovisioned", "stopped"):
             projected = float(r["cost_per_hr"]) * HOURS_PER_MONTH
             total_monthly += projected
-
             cc = r["policy_tags"].get("cost-centre", "untagged")
             by_cc[cc] = round(by_cc.get(cc, 0) + projected, 2)
 
-        # stale = active resource that has blown past its TTL
-        # scheduler should have caught this but the dashboard shows it anyway
         if r["ttl_hours"] and r["status"] == "active":
             created = r["created_at"]
+            if isinstance(created, str):
+                created = datetime.fromisoformat(created.replace(" ", "T"))
             if created.tzinfo is None:
                 created = created.replace(tzinfo=timezone.utc)
-            age_h = (now - created).total_seconds() / 3600
-            if age_h > r["ttl_hours"]:
+            if (now - created).total_seconds() / 3600 > r["ttl_hours"]:
                 stale_count += 1
 
-    # grab the 10 most recent audit events for the activity feed
     recent_events = db.execute(
         text("SELECT * FROM events ORDER BY occurred_at DESC LIMIT 10")
     ).fetchall()
+
+    budget_rows   = db.execute(text("SELECT * FROM budget_alerts")).fetchall()
+    budget_alerts = []
+    for b in budget_rows:
+        b         = dict(b._mapping)
+        projected = by_cc.get(b["cost_centre"], 0)
+        limit     = float(b["monthly_limit"])
+        util      = projected / limit if limit > 0 else 0
+        if util >= float(b["alert_threshold"]):
+            budget_alerts.append({
+                "cost_centre":     b["cost_centre"],
+                "severity":        "critical" if util >= 1.0 else "warning",
+                "utilization_pct": round(util * 100, 1),
+                "limit":           limit,
+                "projected":       round(projected, 2),
+            })
 
     return {
         "total_resources":         len(resources),
@@ -78,6 +77,7 @@ def _build_snapshot(db: Session) -> dict:
         "total_projected_monthly": round(total_monthly, 2),
         "cost_by_cost_centre":     by_cc,
         "recent_events":           [dict(e._mapping) for e in recent_events],
+        "budget_alerts":           budget_alerts,
     }
 
 
@@ -89,165 +89,123 @@ def dashboard_json(db: Session = Depends(get_db)):
 @router.get("/ui", response_class=HTMLResponse, include_in_schema=False)
 def dashboard_html(db: Session = Depends(get_db)):
     data = _build_snapshot(db)
-    return _render_html(data)
+    tl   = json.dumps(list(data["by_type"].keys()))
+    tv   = json.dumps(list(data["by_type"].values()))
+    sl   = json.dumps(list(data["by_status"].keys()))
+    sv   = json.dumps(list(data["by_status"].values()))
+    cl   = json.dumps(list(data["cost_by_cost_centre"].keys()))
+    cv   = json.dumps(list(data["cost_by_cost_centre"].values()))
+    active      = data["by_status"].get("active", 0)
+    stale_color = "rgb(var(--c-pink))" if data["stale_resources"] > 0 else "rgb(var(--c-teal))"
 
-
-def _render_html(data: dict) -> str:
-    # build the card blocks for type/status breakdowns
-    def card(label, count, color):
-        return f"""
-        <div class="card">
-            <div class="card-label">{label}</div>
-            <div class="card-value" style="color:{color}">{count}</div>
-        </div>"""
-
-    type_cards   = "".join(card(k, v, "#4A9EFF") for k, v in data["by_type"].items())
-    status_cards = "".join(card(k, v, "#50C878") for k, v in data["by_status"].items())
-
-    cc_rows = "".join(
-        f"<tr><td>{cc}</td><td>${cost:.2f}</td></tr>"
-        for cc, cost in data["cost_by_cost_centre"].items()
-    ) or "<tr><td colspan='2' style='color:#94a3b8'>No active resources</td></tr>"
+    alerts_html = "".join(
+        f'<div class="alert-row"><span class="badge badge-{a["severity"]}">{a["severity"].upper()}</span>'
+        f'<strong>{a["cost_centre"]}</strong> — ${a["projected"]:.2f} of ${a["limit"]:.2f} ({a["utilization_pct"]}%)</div>'
+        for a in data["budget_alerts"]
+    ) or "<p class='muted'>No budget alerts configured.</p>"
 
     event_rows = "".join(
-        f"<tr><td>{e['action']}</td>"
-        f"<td>{e['resource_id'][:8]}...</td>"
-        f"<td>{e['actor']}</td>"
-        f"<td>{str(e['occurred_at'])[:19]}</td></tr>"
+        f"<tr><td><code>{e['action']}</code></td><td class='muted'>{e['resource_id'][:8]}…</td>"
+        f"<td>{e['actor']}</td><td class='muted'>{str(e['occurred_at'])[:19]}</td></tr>"
         for e in data["recent_events"]
-    ) or "<tr><td colspan='4' style='color:#94a3b8'>No events yet</td></tr>"
-
-    stale_color = "#ef4444" if data["stale_resources"] > 0 else "#50C878"
+    ) or "<tr><td colspan='4' class='muted' style='padding:1rem'>No events yet</td></tr>"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Cloud Resource Manager — Dashboard</title>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cloud Resource Manager</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>if(localStorage.getItem('theme')==='dark')document.documentElement.classList.add('dark');</script>
 <style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-
-  body {{
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #0f1117;
-    color: #e2e8f0;
-    padding: 2rem;
-  }}
-
-  h1 {{ font-size: 1.6rem; margin-bottom: 0.25rem; }}
-
-  .subtitle {{
-    color: #94a3b8;
-    font-size: 0.9rem;
-    margin-bottom: 2rem;
-  }}
-
-  .section {{ margin-bottom: 2rem; }}
-
-  .section h2 {{
-    font-size: 1rem;
-    color: #94a3b8;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-    margin-bottom: 0.75rem;
-  }}
-
-  .cards {{ display: flex; flex-wrap: wrap; gap: 1rem; }}
-
-  .card {{
-    background: #1e2130;
-    border-radius: 8px;
-    padding: 1rem 1.5rem;
-    min-width: 130px;
-  }}
-
-  .card-label {{ font-size: 0.78rem; color: #94a3b8; margin-bottom: 0.3rem; }}
-  .card-value  {{ font-size: 1.8rem; font-weight: 700; }}
-
-  /* the three big headline numbers at the top */
-  .highlight {{
-    background: #1e2130;
-    border-radius: 8px;
-    padding: 1rem 1.5rem;
-    display: inline-block;
-    margin-right: 1rem;
-    margin-bottom: 1rem;
-  }}
-
-  .hl-label {{ font-size: 0.78rem; color: #94a3b8; }}
-  .hl-value  {{ font-size: 2rem; font-weight: 700; color: #f59e0b; }}
-
-  table {{
-    width: 100%;
-    border-collapse: collapse;
-    background: #1e2130;
-    border-radius: 8px;
-    overflow: hidden;
-  }}
-
-  th {{
-    text-align: left;
-    padding: 0.6rem 1rem;
-    background: #2d3148;
-    font-size: 0.8rem;
-    color: #94a3b8;
-    text-transform: uppercase;
-  }}
-
-  td {{ padding: 0.6rem 1rem; border-top: 1px solid #2d3148; font-size: 0.9rem; }}
-  tr:hover td {{ background: #252840; }}
+:root{{--c-canvas:251 247 239;--c-panel:255 252 245;--c-panel2:243 235 220;--c-line:215 205 189;--c-ink:40 27 53;--c-mute:102 91 108;--c-violet:91 60 136;--c-orchid:116 74 160;--c-pink:143 80 126;--c-plum:61 40 84;--c-gold:140 101 25;--c-gold-soft:218 182 93;--c-teal:39 109 106;}}
+.dark{{--c-canvas:23 19 30;--c-panel:33 26 43;--c-panel2:46 36 59;--c-line:84 72 103;--c-ink:245 240 248;--c-mute:198 189 204;--c-violet:201 181 228;--c-orchid:214 183 230;--c-pink:224 169 207;--c-plum:185 161 213;--c-gold:228 191 104;--c-gold-soft:244 216 147;--c-teal:117 196 188;}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:system-ui,sans-serif;background:rgb(var(--c-canvas));color:rgb(var(--c-ink));padding:2rem;transition:background .2s,color .2s}}
+h1{{font-size:1.4rem;font-weight:700;margin-bottom:.2rem;color:rgb(var(--c-plum))}}
+.sub{{color:rgb(var(--c-mute));font-size:.85rem;margin-bottom:2rem;display:flex;justify-content:space-between;align-items:center}}
+section{{margin-bottom:2rem}}
+h2{{font-size:.72rem;color:rgb(var(--c-mute));text-transform:uppercase;letter-spacing:.08em;margin-bottom:.75rem}}
+.kpis{{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem;margin-bottom:2rem}}
+.card{{background:rgb(var(--c-panel));border-radius:10px;padding:1.25rem;border:1px solid rgb(var(--c-line))}}
+.kpi-label{{font-size:.7rem;color:rgb(var(--c-mute));text-transform:uppercase;letter-spacing:.06em}}
+.kpi-value{{font-size:2rem;font-weight:700;margin-top:.2rem}}
+.charts{{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem}}
+.chart-wrap{{background:rgb(var(--c-panel));border-radius:10px;padding:1.25rem;margin-bottom:1rem;border:1px solid rgb(var(--c-line))}}
+.ch{{position:relative;height:200px}}
+table{{width:100%;border-collapse:collapse;background:rgb(var(--c-panel));border-radius:10px;overflow:hidden;border:1px solid rgb(var(--c-line))}}
+th{{background:rgb(var(--c-panel2));padding:.6rem 1rem;text-align:left;font-size:.72rem;color:rgb(var(--c-mute));text-transform:uppercase}}
+td{{padding:.55rem 1rem;border-top:1px solid rgb(var(--c-line));font-size:.85rem}}
+tr:hover td{{background:rgb(var(--c-panel2))}}
+code{{background:rgb(var(--c-panel2));padding:.1rem .4rem;border-radius:4px;font-size:.78rem;color:rgb(var(--c-violet))}}
+.badge{{padding:.15rem .5rem;border-radius:4px;font-size:.72rem;font-weight:700;margin-right:.5rem}}
+.badge-critical{{background:#fee2e2;color:#dc2626}}
+.badge-warning{{background:#fef3c7;color:#d97706}}
+.alert-row{{padding:.65rem .85rem;border-radius:6px;margin-bottom:.4rem;background:rgb(var(--c-panel));font-size:.85rem;border:1px solid rgb(var(--c-line))}}
+.muted{{color:rgb(var(--c-mute))}}
+.toggle{{background:rgb(var(--c-panel2));border:1px solid rgb(var(--c-line));color:rgb(var(--c-ink));padding:.3rem .8rem;border-radius:6px;cursor:pointer;font-size:.8rem;transition:.15s}}
+.toggle:hover{{background:rgb(var(--c-violet));color:rgb(var(--c-canvas))}}
 </style>
 </head>
 <body>
+<h1>☁ Cloud Resource Manager</h1>
+<div class="sub"><span>Live operational snapshot</span><div style="display:flex;gap:1rem;align-items:center"><span class="muted">Refreshing in <span id="cd">30</span>s</span><button class="toggle" onclick="toggleTheme()">🌓 Theme</button></div></div>
 
-<h1>&#9729; Cloud Resource Manager</h1>
-<p class="subtitle">Live operational snapshot &mdash; refreshes on page load</p>
-
-<div class="section">
-  <div class="cards">
-    <div class="highlight">
-      <div class="hl-label">Total Resources</div>
-      <div class="hl-value">{data['total_resources']}</div>
-    </div>
-    <div class="highlight">
-      <div class="hl-label">Projected Monthly Cost</div>
-      <div class="hl-value">${data['total_projected_monthly']:.2f}</div>
-    </div>
-    <div class="highlight">
-      <div class="hl-label">Stale Resources</div>
-      <div class="hl-value" style="color:{stale_color}">{data['stale_resources']}</div>
-    </div>
-  </div>
+<div class="kpis">
+  <div class="card"><div class="kpi-label">Total Resources</div><div class="kpi-value" style="color:rgb(var(--c-violet))">{data['total_resources']}</div></div>
+  <div class="card"><div class="kpi-label">Active</div><div class="kpi-value" style="color:rgb(var(--c-teal))">{active}</div></div>
+  <div class="card"><div class="kpi-label">Projected Monthly</div><div class="kpi-value" style="color:rgb(var(--c-gold))">${data['total_projected_monthly']:.2f}</div></div>
+  <div class="card"><div class="kpi-label">Stale Resources</div><div class="kpi-value" style="color:{stale_color}">{data['stale_resources']}</div></div>
 </div>
 
-<div class="section">
-  <h2>By Type</h2>
-  <div class="cards">{type_cards}</div>
+<div class="charts">
+  <div class="chart-wrap"><h2>By Type</h2><div class="ch"><canvas id="typeChart"></canvas></div></div>
+  <div class="chart-wrap"><h2>By Status</h2><div class="ch"><canvas id="statusChart"></canvas></div></div>
 </div>
+<div class="chart-wrap"><h2>Projected Monthly Cost by Cost-Centre (USD)</h2><div class="ch" style="height:250px"><canvas id="ccChart"></canvas></div></div>
 
-<div class="section">
-  <h2>By Status</h2>
-  <div class="cards">{status_cards}</div>
-</div>
+<section style="margin-top:1rem">
+  <h2>Budget Alerts</h2>
+  {alerts_html}
+</section>
 
-<div class="section">
-  <h2>Projected Monthly Cost by Cost-Centre</h2>
-  <table>
-    <thead><tr><th>Cost-Centre</th><th>Projected / Month</th></tr></thead>
-    <tbody>{cc_rows}</tbody>
-  </table>
-</div>
-
-<div class="section">
+<section>
   <h2>Recent Audit Events</h2>
   <table>
-    <thead>
-      <tr><th>Action</th><th>Resource</th><th>Actor</th><th>Time (UTC)</th></tr>
-    </thead>
+    <thead><tr><th>Action</th><th>Resource</th><th>Actor</th><th>Time (UTC)</th></tr></thead>
     <tbody>{event_rows}</tbody>
   </table>
-</div>
+</section>
 
+<script>
+function css(v){{return'rgb('+getComputedStyle(document.documentElement).getPropertyValue('--'+v).trim()+')'}}
+let charts=[];
+function mkChart(id,type,labels,data,colors,noLegend=false){{
+  return new Chart(document.getElementById(id),{{
+    type,
+    data:{{labels,datasets:[{{data,backgroundColor:colors,borderWidth:0}}]}},
+    options:{{
+      maintainAspectRatio:false,
+      plugins:{{legend:{{display:!noLegend,labels:{{color:css('c-mute'),boxWidth:12}}}}}},
+      scales:type==='bar'?{{x:{{ticks:{{color:css('c-mute')}},grid:{{color:css('c-line')}}}},y:{{ticks:{{color:css('c-mute')}},grid:{{color:css('c-line')}}}}}}:{{}}
+    }}
+  }});
+}}
+function buildCharts(){{
+  charts.forEach(c=>c.destroy());charts=[];
+  const C=[css('c-violet'),css('c-teal'),css('c-gold'),css('c-pink')];
+  charts.push(mkChart('typeChart',  'doughnut',{tl},{tv},C));
+  charts.push(mkChart('statusChart','doughnut',{sl},{sv},C));
+  charts.push(mkChart('ccChart',    'bar',     {cl},{cv},C,true));
+}}
+function toggleTheme(){{
+  document.documentElement.classList.toggle('dark');
+  localStorage.setItem('theme',document.documentElement.classList.contains('dark')?'dark':'light');
+  buildCharts();
+}}
+buildCharts();
+let s=30;const cd=document.getElementById('cd');
+setInterval(()=>{{cd.textContent=--s;if(s<=0)location.reload();}},1000);
+</script>
 </body>
 </html>"""

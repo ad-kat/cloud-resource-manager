@@ -32,7 +32,7 @@ app = FastAPI(
     title="Cloud Resource Lifecycle Manager",
     description=(
         "REST API for cloud resource lifecycle — provisioning, governance, "
-        "cost tracking (live AWS pricing), drift detection, and export. "
+        "cost tracking (live Azure pricing), drift detection, and export. "
         "All free. All open source. No vendor lock-in."
     ),
     version="3.0.0",
