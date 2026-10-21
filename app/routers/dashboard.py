@@ -121,11 +121,8 @@ def dashboard_html(db: Session = Depends(get_db)):
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Cloud Resource Manager</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-<script>if(localStorage.getItem('theme')==='dark')document.documentElement.classList.add('dark');</script>
 <style>
-:root{{--c-canvas:251 247 239;--c-panel:255 252 245;--c-panel2:243 235 220;--c-line:215 205 189;--c-ink:40 27 53;--c-mute:102 91 108;--c-violet:91 60 136;--c-orchid:116 74 160;--c-pink:143 80 126;--c-plum:61 40 84;--c-gold:140 101 25;--c-gold-soft:218 182 93;--c-teal:39 109 106;}}
-.dark{{--c-canvas:23 19 30;--c-panel:33 26 43;--c-panel2:46 36 59;--c-line:84 72 103;--c-ink:245 240 248;--c-mute:198 189 204;--c-violet:201 181 228;--c-orchid:214 183 230;--c-pink:224 169 207;--c-plum:185 161 213;--c-gold:228 191 104;--c-gold-soft:244 216 147;--c-teal:117 196 188;}}
-*{{box-sizing:border-box;margin:0;padding:0}}
+:root{{--c-canvas:251 247 239;--c-panel:255 252 245;--c-panel2:243 235 220;--c-line:215 205 189;--c-ink:40 27 53;--c-mute:102 91 108;--c-violet:91 60 136;--c-orchid:116 74 160;--c-pink:143 80 126;--c-plum:61 40 84;--c-gold:140 101 25;--c-gold-soft:218 182 93;--c-teal:39 109 106;}}*{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:system-ui,sans-serif;background:rgb(var(--c-canvas));color:rgb(var(--c-ink));padding:2rem;transition:background .2s,color .2s}}
 h1{{font-size:1.4rem;font-weight:700;margin-bottom:.2rem;color:rgb(var(--c-plum))}}
 .sub{{color:rgb(var(--c-mute));font-size:.85rem;margin-bottom:2rem;display:flex;justify-content:space-between;align-items:center}}
@@ -154,7 +151,7 @@ code{{background:rgb(var(--c-panel2));padding:.1rem .4rem;border-radius:4px;font
 </head>
 <body>
 <h1>☁ Cloud Resource Manager</h1>
-<div class="sub"><span>Live operational snapshot</span><div style="display:flex;gap:1rem;align-items:center"><span class="muted">Refreshing in <span id="cd">30</span>s</span><button class="toggle" onclick="toggleTheme()">🌓 Theme</button></div></div>
+<div class="sub"><span>Live operational snapshot</span><div style="display:flex;gap:1rem;align-items:center"><span class="muted">Refreshing in <span id="cd">30</span>s</span></div></div>
 
 <div class="kpis">
   <div class="card"><div class="kpi-label">Total Resources</div><div class="kpi-value" style="color:rgb(var(--c-violet))">{data['total_resources']}</div></div>
@@ -226,11 +223,6 @@ function buildCharts(){{
       }}
     }}
   }}));
-}}
-function toggleTheme(){{
-  document.documentElement.classList.toggle('dark');
-  localStorage.setItem('theme',document.documentElement.classList.contains('dark')?'dark':'light');
-  buildCharts();
 }}
 buildCharts();
 let s=30;const cd=document.getElementById('cd');

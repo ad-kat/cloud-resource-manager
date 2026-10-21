@@ -1,10 +1,7 @@
 .venv/
+.claude/
 
-echo "*.db" >> .gitignore
-git rm --cached resources.db
-git add .
-git commit -m "Fix resources router, remove db file from tracking"
-git push
+
 # Windows WSL leaves these metadata files on every downloaded file
 *Zone.Identifier
 *.Zone.Identifier

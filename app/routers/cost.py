@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import text
 
@@ -27,7 +28,12 @@ def _active_hours(created_at: datetime, updated_at: datetime, res_status: str) -
     else:
         end = datetime.now(timezone.utc)
 
-    # sqlite returns naive datetimes, postgres returns tz-aware — handle both
+    # sqlite may return strings instead of datetimes
+    if isinstance(created_at, str):
+        created_at = datetime.fromisoformat(created_at.replace(" ", "T"))
+    if isinstance(end, str):
+        end = datetime.fromisoformat(end.replace(" ", "T"))
+
     start = created_at
     if start.tzinfo is None:
         start = start.replace(tzinfo=timezone.utc)
@@ -221,26 +227,68 @@ def check_budget_alerts(db: Session = Depends(get_db)):
     return {"alerts": alerts, "triggered": len(alerts)}
 
 
-@router.get("/rates", summary="Show current pricing rates in use")
+@router.get("/rates", summary="Show current pricing rates in use", response_class=HTMLResponse)
 def get_current_rates():
     """
     Shows what hourly rates the system is currently using for cost estimation.
-    Pulled from the AWS Pricing API on startup (with fallback to static rates).
-    Useful for debugging why your bill looks weird.
+    Pulled from the Azure Retail Pricing API on startup (with fallback to static rates).
     """
     from app.pricing import get_all_rates, _last_refresh, FALLBACK_RATES
     import time
 
     rates    = get_all_rates()
     age_secs = int(time.time() - _last_refresh) if _last_refresh > 0 else None
+    cache_label = f"{age_secs}s ago" if age_secs is not None else "unknown"
 
-    return {
-        "rates":          {k: f"${v:.6f}/hr" for k, v in rates.items()},
-        "source":         "Azure Retail Pricing API (with static fallback)",
-        "cache_age_secs": age_secs,
-        "fallback_rates": {k: f"${v:.6f}/hr" for k, v in FALLBACK_RATES.items()},
-        "note":           "Rates cached for 6 hours, refreshed in background on startup.",
-    }
+    rate_rows = "".join(
+        f'<tr><td>{k.capitalize()}</td><td>${v:.6f}/hr</td><td>${v * 730:.2f}/mo</td></tr>'
+        for k, v in rates.items()
+    )
+    fallback_rows = "".join(
+        f'<tr><td>{k.capitalize()}</td><td>${v:.6f}/hr</td></tr>'
+        for k, v in FALLBACK_RATES.items()
+    )
+
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pricing Rates &mdash; Cloud Resource Manager</title>
+<style>
+:root{{--c-canvas:251 247 239;--c-panel:255 252 245;--c-panel2:243 235 220;--c-line:215 205 189;--c-ink:40 27 53;--c-mute:102 91 108;--c-violet:91 60 136;--c-plum:61 40 84;--c-gold:140 101 25;--c-teal:39 109 106;}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:system-ui,sans-serif;background:rgb(var(--c-canvas));color:rgb(var(--c-ink));padding:2rem}}
+h1{{font-size:1.4rem;font-weight:700;color:rgb(var(--c-plum));margin-bottom:.2rem}}
+.sub{{color:rgb(var(--c-mute));font-size:.85rem;margin-bottom:2rem}}
+h2{{font-size:.72rem;color:rgb(var(--c-mute));text-transform:uppercase;letter-spacing:.08em;margin-bottom:.75rem}}
+.card{{background:rgb(var(--c-panel));border-radius:10px;padding:1.25rem;border:1px solid rgb(var(--c-line));margin-bottom:1.5rem;max-width:600px}}
+table{{width:100%;border-collapse:collapse;background:rgb(var(--c-panel));border-radius:10px;overflow:hidden;border:1px solid rgb(var(--c-line));max-width:600px;margin-bottom:1.5rem}}
+th{{background:rgb(var(--c-panel2));padding:.6rem 1rem;text-align:left;font-size:.72rem;color:rgb(var(--c-mute));text-transform:uppercase}}
+td{{padding:.55rem 1rem;border-top:1px solid rgb(var(--c-line));font-size:.85rem}}
+tr:hover td{{background:rgb(var(--c-panel2))}}
+.pill{{display:inline-block;padding:.15rem .6rem;border-radius:20px;font-size:.75rem;font-weight:600;background:rgb(var(--c-panel2));color:rgb(var(--c-teal));border:1px solid rgb(var(--c-line))}}
+a{{color:rgb(var(--c-violet));text-decoration:none}}a:hover{{text-decoration:underline}}
+</style>
+</head>
+<body>
+<h1>&#128176; Pricing Rates</h1>
+<div class="sub">Azure Retail Pricing API &nbsp;[CACHED: <span class="pill">{cache_label}</span>]&nbsp; (refreshed every 6 hours) &nbsp;&bull;&nbsp; <a href="/">&#8592; Home</a></div>
+
+<h2>Live rates</h2>
+<table>
+  <thead><tr><th>Resource Type</th><th>Hourly</th><th>Est. Monthly (730 hr)</th></tr></thead>
+  <tbody>{rate_rows}</tbody>
+</table>
+
+<h2>Fallback rates (used if Azure API is unavailable)</h2>
+<table>
+  <thead><tr><th>Resource Type</th><th>Hourly</th></tr></thead>
+  <tbody>{fallback_rows}</tbody>
+</table>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 
 @router.get("/forecast", summary="Project future costs from current burn rate")
